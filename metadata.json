@@ -1,0 +1,8 @@
+{
+  "name": "The Blue Cube Dimension",
+  "description": "A first-person 3D journey into a mysterious blue void. Walk inside the cube and explore the digital space.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
