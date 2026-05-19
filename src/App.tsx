@@ -21,6 +21,42 @@ const playShotSound = (ctx: AudioContext) => {
   osc.stop(ctx.currentTime + 0.12);
 };
 
+const playHowlShotSound = (ctx: AudioContext) => {
+  const osc = ctx.createOscillator();
+  const noise = ctx.createBufferSource();
+  const gainOsc = ctx.createGain();
+  const gainNoise = ctx.createGain();
+  const master = ctx.createGain();
+
+  // Low punchy oscillator for Howl
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(150, ctx.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(40, ctx.currentTime + 0.1);
+  gainOsc.gain.setValueAtTime(0.2, ctx.currentTime);
+  gainOsc.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.1);
+  osc.connect(gainOsc);
+
+  // White noise burst for rifle crack
+  const bufferSize = ctx.sampleRate * 0.1;
+  const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) {
+    data[i] = Math.random() * 2 - 1;
+  }
+  noise.buffer = buffer;
+  gainNoise.gain.setValueAtTime(0.15, ctx.currentTime);
+  gainNoise.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.1);
+  noise.connect(gainNoise);
+
+  gainOsc.connect(master);
+  gainNoise.connect(master);
+  master.connect(ctx.destination);
+
+  osc.start(ctx.currentTime);
+  noise.start(ctx.currentTime);
+  osc.stop(ctx.currentTime + 0.1);
+};
+
 const playReloadSound = (ctx: AudioContext) => {
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
@@ -116,55 +152,52 @@ const SCIENCE_FACTS = [
 
 export let setGlobalSubtitle: (text: string | null, speaker: string | null) => void = () => {};
 
-class SpeechQueue {
-  private queue: {text: string, pitch: number, rate: number, volume: number, speaker: string}[] = [];
-  private isSpeaking = false;
-
-  add(text: string, pitch = 0.4, rate = 0.9, volume = 1.0, speaker = "SYSTEM") {
-    this.queue.push({ text, pitch, rate, volume, speaker });
-    this.processQueue();
+export const getGlobalAudioCtx = () => {
+  if (!(window as any).globalSharedAudioCtx) {
+    (window as any).globalSharedAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
   }
+  return (window as any).globalSharedAudioCtx;
+};
 
-  private processQueue() {
-    if (this.isSpeaking || this.queue.length === 0) {
-        if (this.queue.length === 0 && !this.isSpeaking) setGlobalSubtitle(null, null);
-        return;
-    }
-    if (!('speechSynthesis' in window)) return;
+export function playRobotSpeech(text: string, pitch = 0.4, volume = 1.0, speaker = "SYSTEM") {
+  if (volume <= 0.01) return; // Inaudible
+  const ctx = getGlobalAudioCtx();
+  if (ctx.state === 'suspended') ctx.resume();
+  
+  setGlobalSubtitle(text, speaker);
+  setTimeout(() => setGlobalSubtitle(null, null), Math.max(3000, text.length * 100));
 
-    this.isSpeaking = true;
-    const next = this.queue.shift()!;
-    const utterance = new SpeechSynthesisUtterance(next.text);
-    utterance.pitch = next.pitch;
-    utterance.rate = next.rate;
-    utterance.volume = next.volume;
+  const syllables = text.split(/[ ,.]+/).filter(s => s.length > 0);
+  let time = ctx.currentTime;
+  
+  syllables.forEach((s) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
     
-    const voices = window.speechSynthesis.getVoices();
-    const preferredVoice = voices.find(v => v.name.includes('Google UK English Male') || v.name.includes('Samantha') || v.name.includes('Daniel')) || voices[0];
-    if (preferredVoice) utterance.voice = preferredVoice;
-
-    utterance.onstart = () => {
-      setGlobalSubtitle(next.text, next.speaker);
-    };
-
-    utterance.onend = () => {
-      this.isSpeaking = false;
-      this.processQueue();
-    };
-
-    utterance.onerror = () => {
-      this.isSpeaking = false;
-      this.processQueue();
-    };
-
-    window.speechSynthesis.speak(utterance);
-  }
+    osc.type = 'square';
+    osc.frequency.value = (Math.max(0.1, pitch) * 800) * (1 + (s.length % 3) * 0.1);
+    
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    
+    // Envelope to sound like robot speech
+    gain.gain.setValueAtTime(0, time);
+    gain.gain.linearRampToValueAtTime(Math.min(volume, 1.0) * 0.15, time + 0.02);
+    
+    const duration = Math.min(0.2, 0.05 + s.length * 0.02);
+    gain.gain.setValueAtTime(Math.min(volume, 1.0) * 0.15, time + duration - 0.02);
+    gain.gain.linearRampToValueAtTime(0, time + duration);
+    
+    osc.start(time);
+    osc.stop(time + duration);
+    
+    time += duration + 0.03; // gap between syllables
+  });
 }
-export const globalSpeechQueue = new SpeechQueue();
 
 function speakFact(text: string, dist?: number) {
   const volume = dist !== undefined ? Math.max(0, 1.0 - (dist / 10)) : 1.0;
-  globalSpeechQueue.add(text, 0.4, 0.9, volume, "FACT_BOT");
+  playRobotSpeech(text, 0.4, volume, "FACT_BOT");
 }
 
 // --- DATA TYPES ---
@@ -296,11 +329,21 @@ function LaserProjectiles() {
   );
 }
 
-function Weapon({ isFiring, isReloading }: { isFiring: boolean; isReloading: boolean }) {
+function Weapon({ isFiring, isReloading, type }: { isFiring: boolean; isReloading: boolean; type: 'SMG' | 'M4_HOWL' }) {
   const weaponRef = useRef<THREE.Group>(null);
   const flashRef = useRef<THREE.Group>(null);
   const magRef = useRef<THREE.Group>(null);
+  const handRef = useRef<THREE.Group>(null);
   const recoilRef = useRef(0);
+  const reloadStartTimeRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (isReloading) {
+      reloadStartTimeRef.current = Date.now();
+    } else {
+      reloadStartTimeRef.current = null;
+    }
+  }, [isReloading]);
 
   useFrame((state) => {
     if (!weaponRef.current) return;
@@ -318,7 +361,7 @@ function Weapon({ isFiring, isReloading }: { isFiring: boolean; isReloading: boo
     // Recoil animation
     if (isFiring) {
       recoilRef.current = THREE.MathUtils.lerp(recoilRef.current, 1, 0.4);
-      weaponRef.current.rotation.x = THREE.MathUtils.lerp(weaponRef.current.rotation.x, -0.15 - Math.random() * 0.02, 0.4);
+      weaponRef.current.rotation.x = THREE.MathUtils.lerp(weaponRef.current.rotation.x, type === 'M4_HOWL' ? -0.2 : -0.15 - Math.random() * 0.02, 0.4);
       weaponRef.current.rotation.y = THREE.MathUtils.lerp(weaponRef.current.rotation.y, (Math.random() - 0.5) * 0.02, 0.4);
     } else {
       recoilRef.current = THREE.MathUtils.lerp(recoilRef.current, 0, 0.1);
@@ -327,19 +370,50 @@ function Weapon({ isFiring, isReloading }: { isFiring: boolean; isReloading: boo
     }
 
     // Reload animation Logic
-    if (isReloading) {
-      // Tilt weapon up
-      weaponRef.current.rotation.z = THREE.MathUtils.lerp(weaponRef.current.rotation.z, 0.4, 0.1);
-      weaponRef.current.rotation.x = THREE.MathUtils.lerp(weaponRef.current.rotation.x, 0.2, 0.1);
+    if (isReloading && reloadStartTimeRef.current) {
+      const elapsed = (Date.now() - reloadStartTimeRef.current) / 1000; // 0 to 1s
       
-      // Move magazine
-      if (magRef.current) {
-        magRef.current.position.y = THREE.MathUtils.lerp(magRef.current.position.y, -4, 0.05);
+      // Tilt weapon up / left for reload
+      weaponRef.current.rotation.z = THREE.MathUtils.lerp(weaponRef.current.rotation.z, 0.6, 0.2);
+      weaponRef.current.rotation.x = THREE.MathUtils.lerp(weaponRef.current.rotation.x, 0.4, 0.2);
+      
+      let magY = -2;
+      let handY = -12;
+      
+      // Sequence
+      if (elapsed < 0.2) {
+        handY = -12 + (elapsed / 0.2) * 10;
+        magY = -2;
+      } else if (elapsed < 0.4) {
+        const t = (elapsed - 0.2) / 0.2;
+        handY = -2 - t * 10;
+        magY = -2 - t * 10;
+      } else if (elapsed < 0.6) {
+        handY = -12;
+        magY = -12;
+      } else if (elapsed < 0.8) {
+        const t = (elapsed - 0.6) / 0.2;
+        handY = -12 + t * 10;
+        magY = -12 + t * 10;
+      } else {
+        const t = (elapsed - 0.8) / 0.2;
+        handY = -2 - t * 10;
+        magY = -2;
+      }
+
+      if (magRef.current) magRef.current.position.y = magY;
+      if (handRef.current) {
+        handRef.current.position.y = handY;
+        handRef.current.rotation.x = Math.sin(elapsed * Math.PI * 6) * 0.1;
       }
     } else {
       weaponRef.current.rotation.z = THREE.MathUtils.lerp(weaponRef.current.rotation.z, 0, 0.1);
       if (magRef.current) {
         magRef.current.position.y = THREE.MathUtils.lerp(magRef.current.position.y, -2, 0.2);
+      }
+      if (handRef.current) {
+        handRef.current.position.y = THREE.MathUtils.lerp(handRef.current.position.y, -12, 0.2);
+        handRef.current.rotation.x = THREE.MathUtils.lerp(handRef.current.rotation.x, 0, 0.2);
       }
     }
 
@@ -355,61 +429,208 @@ function Weapon({ isFiring, isReloading }: { isFiring: boolean; isReloading: boo
 
   return (
     <group ref={weaponRef} scale={[0.1, 0.1, 0.1]} rotation={[0, -Math.PI / 1.05, 0]}>
-      {/* Sci-Fi SMG Design */}
-      {/* Main Upper Receiver */}
-      <Box args={[1.2, 1.2, 8]} position={[0, 1.4, -1]}>
-        <meshStandardMaterial color="#0f172a" metalness={0.9} roughness={0.1} />
-      </Box>
-      <Box args={[1.4, 1.4, 6]} position={[0, 1.4, -1]}>
-        <meshStandardMaterial color="#1e293b" metalness={0.8} roughness={0.2} wireframe={true} />
-      </Box>
-      {/* Lower Receiver */}
-      <Box args={[1.5, 2.5, 4]} position={[0, 0, 0]}>
-        <meshStandardMaterial color="#020617" metalness={0.9} roughness={0.3} />
-      </Box>
-      {/* Slanted Accents */}
-      <Box args={[1.3, 0.8, 3]} position={[0, 1.5, -4.5]} rotation={[0.2, 0, 0]}>
-        <meshStandardMaterial color="#334155" metalness={0.7} roughness={0.2} />
-      </Box>
-      <Box args={[1.6, 0.2, 5]} position={[0, 0.2, 1]}>
-        <meshStandardMaterial color="#0ea5e9" emissive="#0ea5e9" emissiveIntensity={0.8} />
-      </Box>
-      {/* Barrel */}
-      <Cylinder args={[0.3, 0.4, 4, 16]} rotation={[Math.PI / 2, 0, 0]} position={[0, 1.2, -6]}>
-        <meshStandardMaterial color="#000" metalness={1} roughness={0.1} />
-      </Cylinder>
-      <Cylinder args={[0.45, 0.45, 2, 8]} rotation={[Math.PI / 2, 0, 0]} position={[0, 1.2, -5.5]}>
-        <meshStandardMaterial color="#1e293b" metalness={0.8} />
-      </Cylinder>
-      {/* Glowing Energy Core */}
-      <Box args={[0.8, 0.8, 2]} position={[0, 1.4, 1.5]}>
-        <meshStandardMaterial color="#38bdf8" emissive="#38bdf8" emissiveIntensity={1.5} />
-      </Box>
-      <pointLight position={[0, 1.4, 1.5]} intensity={0.5} distance={2} color="#38bdf8" />
-      {/* Grip */}
-      <Box args={[1, 2.5, 1.2]} position={[0, -2, 1]} rotation={[0.4, 0, 0]}>
-        <meshStandardMaterial color="#020617" roughness={0.9} />
-      </Box>
-      {/* Trigger Guard */}
-      <Box args={[0.2, 1.5, 0.2]} position={[0, -1.2, 0]} rotation={[0.4, 0, 0]}>
-        <meshStandardMaterial color="#0ea5e9" />
-      </Box>
-      {/* Magazine */}
-      <group ref={magRef} position={[0, -2, -0.5]}>
-        <Box args={[0.8, 4, 1.2]} rotation={[-0.1, 0, 0]}>
-          <meshStandardMaterial color="#0f172a" metalness={0.6} />
-        </Box>
-        <Box args={[0.85, 0.2, 1.25]} position={[0, 1.8, 0]} rotation={[-0.1, 0, 0]}>
-          <meshStandardMaterial color="#38bdf8" emissive="#38bdf8" emissiveIntensity={1} />
-        </Box>
-      </group>
-      {/* Muzzle Flash */}
-      <group ref={flashRef} position={[0, 1.2, -8]}>
-        <pointLight intensity={10} color="#38bdf8" distance={8} />
-        <Sphere args={[1, 12, 12]} scale={[1, 1, 2]}>
-          <meshBasicMaterial color="#38bdf8" transparent opacity={0.6} blending={THREE.AdditiveBlending} />
-        </Sphere>
-      </group>
+      {type === 'SMG' ? (
+        <>
+          {/* Sci-Fi SMG Design */}
+          {/* Main Upper Receiver */}
+          <Box args={[1.2, 1.2, 8]} position={[0, 1.4, -1]}>
+            <meshStandardMaterial color="#0f172a" metalness={0.9} roughness={0.1} />
+          </Box>
+          <Box args={[1.4, 1.4, 6]} position={[0, 1.4, -1]}>
+            <meshStandardMaterial color="#1e293b" metalness={0.8} roughness={0.2} wireframe={true} />
+          </Box>
+          {/* Lower Receiver */}
+          <Box args={[1.5, 2.5, 4]} position={[0, 0, 0]}>
+            <meshStandardMaterial color="#020617" metalness={0.9} roughness={0.3} />
+          </Box>
+          {/* Slanted Accents */}
+          <Box args={[1.3, 0.8, 3]} position={[0, 1.5, -4.5]} rotation={[0.2, 0, 0]}>
+            <meshStandardMaterial color="#334155" metalness={0.7} roughness={0.2} />
+          </Box>
+          <Box args={[1.6, 0.2, 5]} position={[0, 0.2, 1]}>
+            <meshStandardMaterial color="#0ea5e9" emissive="#0ea5e9" emissiveIntensity={0.8} />
+          </Box>
+          {/* Barrel */}
+          <Cylinder args={[0.3, 0.4, 4, 16]} rotation={[Math.PI / 2, 0, 0]} position={[0, 1.2, -6]}>
+            <meshStandardMaterial color="#000" metalness={1} roughness={0.1} />
+          </Cylinder>
+          <Cylinder args={[0.45, 0.45, 2, 8]} rotation={[Math.PI / 2, 0, 0]} position={[0, 1.2, -5.5]}>
+            <meshStandardMaterial color="#1e293b" metalness={0.8} />
+          </Cylinder>
+          {/* Glowing Energy Core */}
+          <Box args={[0.8, 0.8, 2]} position={[0, 1.4, 1.5]}>
+            <meshStandardMaterial color="#38bdf8" emissive="#38bdf8" emissiveIntensity={1.5} />
+          </Box>
+          <pointLight position={[0, 1.4, 1.5]} intensity={0.5} distance={2} color="#38bdf8" />
+          {/* Grip */}
+          <Box args={[1, 2.5, 1.2]} position={[0, -2, 1]} rotation={[0.4, 0, 0]}>
+            <meshStandardMaterial color="#020617" roughness={0.9} />
+          </Box>
+          {/* Trigger Guard */}
+          <Box args={[0.2, 1.5, 0.2]} position={[0, -1.2, 0]} rotation={[0.4, 0, 0]}>
+            <meshStandardMaterial color="#0ea5e9" />
+          </Box>
+          {/* Magazine */}
+          <group ref={magRef} position={[0, -2, -0.5]}>
+            <Box args={[0.8, 4, 1.2]} rotation={[-0.1, 0, 0]}>
+              <meshStandardMaterial color="#0f172a" metalness={0.6} />
+            </Box>
+            <Box args={[0.85, 0.2, 1.25]} position={[0, 1.8, 0]} rotation={[-0.1, 0, 0]}>
+              <meshStandardMaterial color="#38bdf8" emissive="#38bdf8" emissiveIntensity={1} />
+            </Box>
+          </group>
+
+          {/* Sci-Fi Arm / Hand for Reload Animation */}
+          <group ref={handRef} position={[0, -12, -0.3]}>
+            <Box args={[1.1, 6, 1.3]} position={[0, -4, 0]} rotation={[-0.1, 0, 0]}>
+                <meshStandardMaterial color="#1e293b" metalness={0.7} roughness={0.3} />
+            </Box>
+            <Box args={[1.3, 1.8, 1.2]} position={[0, -0.5, 0]}>
+                <meshStandardMaterial color="#020617" roughness={0.9} />
+            </Box>
+            <Box args={[1.5, 1.5, 1.4]} position={[0, 0.8, 0.2]}>
+                <meshStandardMaterial color="#1e293b" />
+            </Box>
+            <Box args={[1.6, 0.2, 0.2]} position={[0, -0.2, 0.8]}>
+                <meshStandardMaterial color="#0ea5e9" emissive="#0ea5e9" emissiveIntensity={0.5} />
+            </Box>
+          </group>
+
+          {/* Muzzle Flash */}
+          <group ref={flashRef} position={[0, 1.2, -8]}>
+            <pointLight intensity={10} color="#38bdf8" distance={8} />
+            <Sphere args={[1, 12, 12]} scale={[1, 1, 2]}>
+              <meshBasicMaterial color="#38bdf8" transparent opacity={0.6} blending={THREE.AdditiveBlending} />
+            </Sphere>
+          </group>
+        </>
+      ) : (
+        <>
+          {/* M4A4 Howl Design */}
+          {/* Lower Receiver */}
+          <Box args={[0.7, 1.2, 5]} position={[0, 1.1, -0.5]}>
+            <meshStandardMaterial color="#1a1c20" metalness={0.7} roughness={0.4} />
+          </Box>
+          {/* Upper Receiver */}
+          <Box args={[0.8, 0.8, 5]} position={[0, 2.1, -0.5]}>
+            <meshStandardMaterial color="#7f1d1d" metalness={0.4} roughness={0.6} />
+          </Box>
+          {/* Rails */}
+          <Box args={[0.85, 0.1, 11]} position={[0, 2.55, -3.5]}>
+            <meshStandardMaterial color="#111111" metalness={0.8} />
+          </Box>
+          
+          {/* Magwell */}
+          <Box args={[0.8, 1.2, 1.6]} position={[0, 0.4, -1.8]} rotation={[0.05, 0, 0]}>
+             <meshStandardMaterial color="#1a1c20" metalness={0.7} roughness={0.4} />
+          </Box>
+          
+          {/* Handguard */}
+          <Box args={[0.8, 1.2, 6]} position={[0, 1.9, -6]}>
+             <meshStandardMaterial color="#881313" metalness={0.4} roughness={0.6} />
+          </Box>
+          <Box args={[0.85, 0.6, 5]} position={[0, 1.9, -6.5]} rotation={[0.02, 0, 0]}>
+             <meshStandardMaterial color="#991b1b" metalness={0.3} roughness={0.5} />
+          </Box>
+
+          {/* Howl Decal Jaws / Fire Accents */}
+          {/* Orange base flame */}
+          <Box args={[0.9, 0.8, 3]} position={[0, 1.6, -5]} rotation={[-0.1, 0, 0]}>
+             <meshStandardMaterial color="#ea580c" metalness={0.2} roughness={0.6} />
+          </Box>
+          {/* Yellow flame lines */}
+          <Box args={[0.95, 0.15, 2.5]} position={[0, 1.5, -4.5]} rotation={[-0.15, 0, 0]}>
+             <meshStandardMaterial color="#fbbf24" emissive="#f59e0b" emissiveIntensity={0.6} />
+          </Box>
+          <Box args={[0.92, 0.1, 1.5]} position={[0, 1.4, -5.5]} rotation={[0.1, 0, 0]}>
+             <meshStandardMaterial color="#fcd34d" emissive="#fbbf24" emissiveIntensity={0.8} />
+          </Box>
+          <Box args={[0.95, 0.05, 2]} position={[0, 1.7, -4.0]} rotation={[-0.05, 0, 0]}>
+             <meshStandardMaterial color="#ef4444" emissive="#dc2626" emissiveIntensity={0.4} />
+          </Box>
+
+          {/* Barrel & Front Sight Block */}
+          <Cylinder args={[0.12, 0.15, 3.5, 16]} rotation={[Math.PI / 2, 0, 0]} position={[0, 1.9, -10.5]}>
+            <meshStandardMaterial color="#2d3748" metalness={0.8} roughness={0.2} />
+          </Cylinder>
+          <Box args={[0.2, 0.8, 0.5]} position={[0, 2.2, -10.5]}>
+            <meshStandardMaterial color="#1a1c20" metalness={0.8} />
+          </Box>
+          <Cylinder args={[0.1, 0.1, 1.5, 16]} rotation={[Math.PI / 2, 0, 0]} position={[0, 1.9, -13]}>
+            <meshStandardMaterial color="#2d3748" metalness={0.8} roughness={0.2} />
+          </Cylinder>
+          {/* Muzzle Device */}
+          <Cylinder args={[0.18, 0.18, 1, 16]} rotation={[Math.PI / 2, 0, 0]} position={[0, 1.9, -14]}>
+            <meshStandardMaterial color="#111" metalness={0.9} roughness={0.1} />
+          </Cylinder>
+
+          {/* Stock */}
+          <group position={[0, 1.5, 3.5]}>
+            <Cylinder args={[0.2, 0.2, 4, 16]} rotation={[Math.PI / 2, 0, 0]} position={[0, 0.4, 0]}>
+              <meshStandardMaterial color="#1f2937" metalness={0.6} />
+            </Cylinder>
+            <Box args={[0.6, 1.5, 3.5]} position={[0, 0, 1]} rotation={[-0.05, 0, 0]}>
+              <meshStandardMaterial color="#111111" metalness={0.5} roughness={0.8} />
+            </Box>
+            <Box args={[0.62, 0.8, 2]} position={[0, 0.3, 1.5]} rotation={[0, 0, 0]}>
+              <meshStandardMaterial color="#7f1d1d" metalness={0.4} roughness={0.5} />
+            </Box>
+            <Box args={[0.5, 1.5, 0.4]} position={[0, -0.1, 2.7]}>
+              <meshStandardMaterial color="#000000" metalness={0.2} roughness={0.9} />
+            </Box>
+          </group>
+
+          {/* Rear Sights */}
+          <Box args={[0.3, 0.6, 0.5]} position={[0, 2.8, -0.5]}>
+            <meshStandardMaterial color="#1a1c20" />
+          </Box>
+
+          {/* Grip */}
+          <Box args={[0.55, 1.8, 1.0]} position={[0, 0.0, 1.2]} rotation={[0.3, 0, 0]}>
+            <meshStandardMaterial color="#111111" metalness={0.3} roughness={0.8} />
+          </Box>
+          
+          {/* Magazine */}
+          <group ref={magRef} position={[0, -2.0, -1.9]}>
+             <Box args={[0.65, 2.0, 1.3]} position={[0, 0.9, 0]} rotation={[0.05, 0, 0]}>
+               <meshStandardMaterial color="#111111" metalness={0.5} roughness={0.7} />
+             </Box>
+             <Box args={[0.65, 1.5, 1.3]} position={[0, -0.7, 0.15]} rotation={[0.15, 0, 0]}>
+               <meshStandardMaterial color="#333333" metalness={0.5} roughness={0.7} />
+             </Box>
+          </group>
+
+          {/* Arm / Hand for Reload Animation */}
+          <group ref={handRef} position={[0, -12, -1.2]}>
+            {/* Sleeve/Arm */}
+            <Box args={[1.2, 6, 1.4]} position={[0, -4, 0]} rotation={[-0.1, 0, 0]}>
+                <meshStandardMaterial color="#3f3f46" metalness={0.1} roughness={0.9} />
+            </Box>
+            {/* Gloves Tactical */}
+            <Box args={[1.4, 2.2, 1.3]} position={[0, -0.5, 0]}>
+                <meshStandardMaterial color="#18181b" roughness={0.9} />
+            </Box>
+            <Box args={[1.6, 1.5, 1.4]} position={[0, 0.8, 0.2]}>
+                <meshStandardMaterial color="#27272a" />
+            </Box>
+            {/* Glove Knuckle details */}
+            <Box args={[1.7, 0.3, 0.4]} position={[0, 0.5, 0.8]}>
+                <meshStandardMaterial color="#52525b" />
+            </Box>
+          </group>
+
+          {/* Muzzle Flash (Orange/Yellow for M4) */}
+          <group ref={flashRef} position={[0, 1.9, -14.5]}>
+            <pointLight intensity={10} color="#f97316" distance={10} />
+            <Sphere args={[1.5, 12, 12]} scale={[1, 1, 2]}>
+              <meshBasicMaterial color="#f97316" transparent opacity={0.7} blending={THREE.AdditiveBlending} />
+            </Sphere>
+            <Sphere args={[0.8, 12, 12]} scale={[1, 1, 1.5]} position={[0, 0, -0.5]}>
+              <meshBasicMaterial color="#fcd34d" transparent opacity={0.9} blending={THREE.AdditiveBlending} />
+            </Sphere>
+          </group>
+        </>
+      )}
     </group>
   );
 }
@@ -562,13 +783,13 @@ function Player({
   ammo, 
   isReloading, 
   targets,
-  isWeaponEquipped
+  activeWeapon
 }: { 
   onFire: (hitId?: string) => void; 
   ammo: number; 
   isReloading: boolean;
   targets: TargetData[];
-  isWeaponEquipped: boolean;
+  activeWeapon: 'NONE' | 'SMG' | 'M4_HOWL';
 }) {
   const { camera, scene } = useThree();
   const [, getKeys] = useKeyboardControls();
@@ -669,7 +890,7 @@ function Player({
     camera.position.x = THREE.MathUtils.clamp(camera.position.x, -14.5, 14.5);
     camera.position.z = THREE.MathUtils.clamp(camera.position.z, -14.5, 14.5);
 
-    if (isWeaponEquipped && isFiringRef.current && !isReloading && ammo > 0) {
+    if (activeWeapon !== 'NONE' && isFiringRef.current && !isReloading && ammo > 0) {
       if (Date.now() - lastFireTimeRef.current > 100) {
           lastFireTimeRef.current = Date.now();
           // Spawn visual laser
@@ -703,7 +924,7 @@ function Player({
   return (
     <group>
       <primitive object={camera}>
-        {isWeaponEquipped && <Weapon isFiring={isFiringRef.current && !isReloading && ammo > 0} isReloading={isReloading} />}
+        {(activeWeapon === 'SMG' || activeWeapon === 'M4_HOWL') && <Weapon isFiring={isFiringRef.current && !isReloading && ammo > 0} isReloading={isReloading} type={activeWeapon} />}
       </primitive>
     </group>
   );
@@ -925,12 +1146,12 @@ function PoolRobot({ position: defaultPos, rotation: defaultRot, active, banter,
             const dirX = Math.cos(aim);
             const dirZ = Math.sin(aim);
             
-            // Robot stays 1.5 units behind cue ball during aiming/shooting
-            targetPos.set(cueBall.position.x - dirX * 1.5, 0.2, cueBall.position.y - dirZ * 1.5);
+            // Robot stays slightly farther behind cue ball
+            targetPos.set(cueBall.position.x - dirX * 2.2, 1.1, cueBall.position.y - dirZ * 2.2);
             
             // Look directly along the aim path
             targetRotY = -aim - Math.PI / 2; 
-            targetRotX = 0.15; // Lean forward slightly
+            targetRotX = 0.6; // Lean forward heavily over the table
         } else if (cueBall) {
             // Unassigned / inactive / post-shot behavior
             followCue = true;
@@ -1143,7 +1364,7 @@ function speakPoolBot(text: string, dist: number, robotId: number) {
   const volume = Math.max(0, 1.0 - (dist / 12));
   const speaker = robotId === 0 ? "POOL_BOT_1 (CYAN)" : "POOL_BOT_2 (RED)";
   const pitch = robotId === 0 ? 1.0 : 0.6;
-  globalSpeechQueue.add(text, pitch, 0.9, volume, speaker);
+  playRobotSpeech(text, pitch, volume, speaker);
 }
 
 // ... 
@@ -1161,7 +1382,7 @@ function speakPoolBot(text: string, dist: number, robotId: number) {
 
     useFrame(() => {
     if (gameState === 'AIMING' || gameState === 'STRIKING' || winner !== null) return;
-    const nextBalls = ballsRef.current.map(b => ({ ...b, position: b.position.clone(), velocity: b.velocity.clone(), rotation: b.rotation.clone() }));
+    const nextBalls = ballsRef.current; // No cloning on every frame
     let anyMoving = false;
     let localUnitTypeAssignment = { ...unitTypeAssignment };
 
@@ -1225,7 +1446,40 @@ function speakPoolBot(text: string, dist: number, robotId: number) {
                             setWinner(turn);
                         }
                     }
-                    setTimeout(() => window.location.reload(), 8000);
+                    setTimeout(() => {
+                        // Reset Game
+                        const b: BallState[] = [];
+                        b.push({ id: 0, position: new THREE.Vector2(0, 2), velocity: new THREE.Vector2(0, 0), rotation: new THREE.Euler(), color: "#fff", potted: false, isCue: true, type: BALL_TYPE.CUE });
+                        let count = 1;
+                        const colors = ["#22d3ee", "#f43f5e"];
+                        const types = [BALL_TYPE.SOLID, BALL_TYPE.STRIPE];
+                        for (let r = 0; r < 5; r++) {
+                        for (let c = 0; c <= r; c++) {
+                            let type = count === 5 ? BALL_TYPE.EIGHT : types[count % 2];
+                            let color = count === 5 ? "#000" : colors[count % 2];
+                            b.push({
+                            id: count,
+                            position: new THREE.Vector2((c - r * 0.5) * 0.25, -1 - r * 0.22),
+                            velocity: new THREE.Vector2(0, 0),
+                            rotation: new THREE.Euler(),
+                            color: color,
+                            potted: false,
+                            isCue: false,
+                            type: type
+                            });
+                            count++;
+                        }
+                        }
+                        setBalls(b);
+                        setWinner(null);
+                        setTurn(0);
+                        setGameState('WAITING');
+                        setUnitTypeAssignment({ 0: null, 1: null });
+                        setPotThisTurn(false);
+                        setScratchThisTurn(false);
+                        setIsMoving(false);
+                        setHasMovementStarted(false);
+                    }, 8000);
                 }
 
                 if (b.type !== BALL_TYPE.EIGHT && !localUnitTypeAssignment[turn]) {
@@ -1293,7 +1547,7 @@ function speakPoolBot(text: string, dist: number, robotId: number) {
     });
 
     if (!anyMoving && isMoving) {
-        setBalls(nextBalls);
+        setBalls(nextBalls.map(b => ({ ...b, position: b.position.clone(), velocity: b.velocity.clone(), rotation: b.rotation.clone() })));
     }
     });
 
@@ -1974,13 +2228,13 @@ function LivingRoom() {
           <meshStandardMaterial color="#0c4a6e" metalness={0.6} roughness={0.4} />
         </Box>
         {/* Cushions */}
-        <Box args={[1.8, 0.4, 1.8]} position={[-1.9, 0.4, 0.1]} radius={0.1}>
+        <Box args={[1.8, 0.4, 1.8]} position={[-1.9, 0.4, 0.1]}>
           <meshStandardMaterial color="#0284c7" roughness={0.7} />
         </Box>
-        <Box args={[1.8, 0.4, 1.8]} position={[0, 0.4, 0.1]} radius={0.1}>
+        <Box args={[1.8, 0.4, 1.8]} position={[0, 0.4, 0.1]}>
           <meshStandardMaterial color="#0284c7" roughness={0.7} />
         </Box>
-        <Box args={[1.8, 0.4, 1.8]} position={[1.9, 0.4, 0.1]} radius={0.1}>
+        <Box args={[1.8, 0.4, 1.8]} position={[1.9, 0.4, 0.1]}>
           <meshStandardMaterial color="#0284c7" roughness={0.7} />
         </Box>
         {/* Backrest */}
@@ -2448,9 +2702,9 @@ function Environment({ targets }: { targets: TargetData[] }) {
       <fog attach="fog" args={["#020617", 10, 80]} />
       
       {/* Interior Ambient Lighting */}
-      <ambientLight intensity={0.4} color="#e0f2fe" />
-      <pointLight position={[0, 12, 0]} intensity={1.5} color="#38bdf8" />
-      <spotLight position={[0, 15, 0]} angle={0.8} penumbra={1} intensity={2} color="#0ea5e9" castShadow />
+      <ambientLight intensity={0.2} color="#0ea5e9" />
+      <pointLight position={[0, 12, 0]} intensity={0.8} color="#38bdf8" />
+      <spotLight position={[0, 15, 0]} angle={0.8} penumbra={1} intensity={1} color="#0ea5e9" castShadow />
       <DynamicLights />
       
       <ShipInterior />
@@ -2598,8 +2852,8 @@ function VirtualCat({ audioCtx }: { audioCtx: React.MutableRefObject<AudioContex
     };
 
     const state = useRef({
-        pos: new THREE.Vector3(0, 0, -2),
-        targetPos: new THREE.Vector3(2, 0, -2),
+        pos: new THREE.Vector3(5, 0, -6),
+        targetPos: new THREE.Vector3(5, 0, -6),
         y: 0,
         targetY: 0,
         startY: 0,
@@ -2637,20 +2891,20 @@ function VirtualCat({ audioCtx }: { audioCtx: React.MutableRefObject<AudioContex
                         // Hop off table
                         s.targetY = 0;
                         s.startY = s.y;
-                        s.targetPos.set(5.5 + (Math.random()-0.5)*7, 0, -4.5 + (Math.random()-0.5)*7);
+                        s.targetPos.set(5.0 + (Math.random()-0.5)*8, 0, -8.0 + (Math.random()-0.5)*8);
                     } else {
                         // Wander on table
-                        s.targetPos.set(5.5 + (Math.random()-0.5)*2, 0, -4.5 + (Math.random()-0.5)*2);
+                        s.targetPos.set(5.0 + (Math.random()-0.5)*2.5, 0, -8.0 + (Math.random()-0.5)*5);
                     }
                 } else {
                     if (Math.random() > 0.8) {
                         // Hop onto table
-                        s.targetY = 1.0; // Slightly above table green
+                        s.targetY = 0.9; // Slightly above table green
                         s.startY = s.y;
-                        s.targetPos.set(5.5 + (Math.random()-0.5)*1, 0, -4.5 + (Math.random()-0.5)*1);
+                        s.targetPos.set(5.0 + (Math.random()-0.5)*1.5, 0, -8.0 + (Math.random()-0.5)*1.5);
                     } else {
                         // Wander on floor
-                        s.targetPos.set((Math.random()-0.5)*10, 0, (Math.random()-0.5)*10);
+                        s.targetPos.set((Math.random()-0.5)*12, 0, (Math.random()-0.5)*12);
                     }
                 }
                 s.timer = 2 + Math.random() * 4;
@@ -2837,16 +3091,81 @@ function VirtualCat({ audioCtx }: { audioCtx: React.MutableRefObject<AudioContex
     );
 }
 
+function WeaponPickup({ activeWeapon, onPickup }: { activeWeapon: string, onPickup: (w: 'M4_HOWL') => void }) {
+  const ref = useRef<THREE.Group>(null);
+  const { camera } = useThree();
+  const [, getKeys] = useKeyboardControls();
+  const [showPrompt, setShowPrompt] = useState(false);
+
+  useFrame((state) => {
+    if (!ref.current) return;
+    ref.current.rotation.y += 0.01;
+    ref.current.position.y = 1.0 + Math.sin(state.clock.elapsedTime * 2) * 0.1;
+
+    const dist = camera.position.distanceTo(ref.current.position);
+    setShowPrompt(dist < 3);
+
+    if (dist < 3 && getKeys().interact && activeWeapon !== 'M4_HOWL') {
+      onPickup('M4_HOWL');
+      // small play sound effect logic can be here, or just let picking up set state.
+    }
+  });
+
+  if (activeWeapon === 'M4_HOWL') return null; // already picked up
+
+  return (
+    <group ref={ref} position={[-8, 1, -1]}>
+      {/* Mini Howl */}
+      <group scale={[0.15, 0.15, 0.15]}>
+          <Box args={[0.7, 1.2, 5]} position={[0, 1.1, -0.5]}>
+            <meshStandardMaterial color="#1a1c20" metalness={0.7} roughness={0.4} />
+          </Box>
+          <Box args={[0.8, 0.8, 5]} position={[0, 2.1, -0.5]}>
+            <meshStandardMaterial color="#7f1d1d" metalness={0.4} roughness={0.6} />
+          </Box>
+          <Box args={[0.8, 1.2, 6]} position={[0, 1.9, -6]}>
+             <meshStandardMaterial color="#881313" metalness={0.4} roughness={0.6} />
+          </Box>
+          <Box args={[0.9, 0.8, 3]} position={[0, 1.6, -5]} rotation={[-0.1, 0, 0]}>
+             <meshStandardMaterial color="#ea580c" metalness={0.2} roughness={0.6} />
+          </Box>
+          <Cylinder args={[0.12, 0.15, 3.5, 16]} rotation={[Math.PI / 2, 0, 0]} position={[0, 1.9, -10.5]}>
+            <meshStandardMaterial color="#2d3748" metalness={0.8} />
+          </Cylinder>
+          <Cylinder args={[0.2, 0.2, 4, 16]} rotation={[Math.PI / 2, 0, 0]} position={[0, 1.9, 3.5]}>
+            <meshStandardMaterial color="#1f2937" metalness={0.6} />
+          </Cylinder>
+          <Box args={[0.6, 1.5, 3.5]} position={[0, 1.5, 4.5]}>
+            <meshStandardMaterial color="#111111" metalness={0.5} roughness={0.8} />
+          </Box>
+          <Box args={[0.65, 2.0, 1.3]} position={[0, -0.5, -1.9]} rotation={[0.05, 0, 0]}>
+             <meshStandardMaterial color="#111111" metalness={0.5} />
+          </Box>
+      </group>
+
+      <pointLight distance={3} intensity={5} color="#ea580c" />
+
+      {showPrompt && (
+        <Html position={[0, 1, 0]} center zIndexRange={[100, 0]}>
+          <div className="text-white text-xs whitespace-nowrap bg-black/80 px-2 py-1 rounded font-mono border border-orange-500">
+            [E] Pick up M4A4 HOWL
+          </div>
+        </Html>
+      )}
+    </group>
+  );
+}
+
 export default function App() {
   const [isStarted, setIsStarted] = useState(false);
   const [isLocked, setIsLocked] = useState(false);
   const [ammo, setAmmo] = useState(30);
-  const [isWeaponEquipped, setIsWeaponEquipped] = useState(true);
+  const [activeWeapon, setActiveWeapon] = useState<'NONE' | 'SMG' | 'M4_HOWL'>('SMG');
   const [isReloading, setIsReloading] = useState(false);
   const [targets, setTargets] = useState<TargetData[]>([
-    { id: 'TARGET_ALPHA', position: new THREE.Vector3(-6, 3, -4), health: 100, maxHealth: 100, offset: 0 },
-    { id: 'TARGET_BETA', position: new THREE.Vector3(6, 4, -6), health: 100, maxHealth: 100, offset: 2.5 },
-    { id: 'TARGET_GAMMA', position: new THREE.Vector3(0, 5, -8), health: 100, maxHealth: 100, offset: 5 },
+    { id: 'TARGET_ALPHA', position: new THREE.Vector3(-6, 8, -4), health: 100, maxHealth: 100, offset: 0 },
+    { id: 'TARGET_BETA', position: new THREE.Vector3(6, 9, -6), health: 100, maxHealth: 100, offset: 2.5 },
+    { id: 'TARGET_GAMMA', position: new THREE.Vector3(0, 10, -8), health: 100, maxHealth: 100, offset: 5 },
   ]);
   
   const lastFireTime = useRef(0);
@@ -2859,7 +3178,8 @@ export default function App() {
       lastFireTime.current = now;
       
       if (!audioCtx.current) audioCtx.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-      playShotSound(audioCtx.current);
+      if (activeWeapon === 'M4_HOWL') playHowlShotSound(audioCtx.current);
+      else playShotSound(audioCtx.current);
 
       if (hitId) {
         playHitSound(audioCtx.current);
@@ -2875,9 +3195,9 @@ export default function App() {
         if (targets.filter(t => (t.id === hitId ? t.health - 20 : t.health) > 0).length === 0) {
           setTimeout(() => {
             setTargets([
-              { id: 'TARGET_A_' + now, position: new THREE.Vector3(-6, 3, -4), health: 100, maxHealth: 100, offset: Math.random() * 10 },
-              { id: 'TARGET_B_' + now, position: new THREE.Vector3(6, 4, -6), health: 100, maxHealth: 100, offset: Math.random() * 10 },
-              { id: 'TARGET_C_' + now, position: new THREE.Vector3(0, 5, -8), health: 100, maxHealth: 100, offset: Math.random() * 10 },
+              { id: 'TARGET_A_' + now, position: new THREE.Vector3(-6, 8, -4), health: 100, maxHealth: 100, offset: Math.random() * 10 },
+              { id: 'TARGET_B_' + now, position: new THREE.Vector3(6, 9, -6), health: 100, maxHealth: 100, offset: Math.random() * 10 },
+              { id: 'TARGET_C_' + now, position: new THREE.Vector3(0, 10, -8), health: 100, maxHealth: 100, offset: Math.random() * 10 },
             ]);
           }, 1500);
         }
@@ -2912,10 +3232,12 @@ export default function App() {
       {isStarted && <HUDSubtitles />}
 
       {/* AMMO HUD */}
-      {isStarted && (
+      {isStarted && activeWeapon !== 'NONE' && (
         <div className="absolute bottom-12 right-12 z-20 pointer-events-none text-right">
           <div className="bg-black/60 backdrop-blur-md p-6 border-l-2 border-cyan-500 rounded-sm shadow-2xl">
-            <div className="text-[10px] text-cyan-500 mb-1 uppercase tracking-widest font-black">Tactical_Systems // SMG-X</div>
+            <div className="text-[10px] text-cyan-500 mb-1 uppercase tracking-widest font-black">
+              Tactical_Systems // {activeWeapon === 'M4_HOWL' ? 'M4A4 HOWL' : 'SMG-X'}
+            </div>
             <div className="flex items-baseline justify-end gap-2">
               <span className={`text-6xl font-light ${ammo <= 5 ? 'text-red-500 animate-pulse' : 'text-white'}`}>
                 {ammo.toString().padStart(2, '0')}
@@ -2960,18 +3282,19 @@ export default function App() {
       >
         <AmbientVoidSound active={isStarted} />
         <Canvas camera={{ position: [0, 1.7, 5], fov: 75 }} shadows>
-          <EffectComposer disableNormalPass>
-            <Bloom luminanceThreshold={0.2} mipmapBlur intensity={1.5} luminanceSmoothing={0.9} />
+          <EffectComposer>
+            <Bloom luminanceThreshold={0.8} mipmapBlur intensity={0.6} luminanceSmoothing={0.9} />
             <ToneMapping mode={THREE.ACESFilmicToneMapping} />
           </EffectComposer>
           <Environment targets={targets} />
+          {isStarted && <WeaponPickup activeWeapon={activeWeapon} onPickup={(w) => setActiveWeapon(w)} />}
           <LaserProjectiles />
           {isStarted && <VirtualCat audioCtx={audioCtx} />}
           {isStarted && (
             <>
               {isLocked && <PointerLockControls onUnlock={() => setIsLocked(false)} />}
-              <Player targets={targets} onFire={handleFire} ammo={ammo} isReloading={isReloading} isWeaponEquipped={isWeaponEquipped} />
-              <InputHandler onReload={handleReload} onToggleWeapon={setIsWeaponEquipped} />
+              <Player targets={targets} onFire={handleFire} ammo={ammo} isReloading={isReloading} activeWeapon={activeWeapon} />
+              <InputHandler onReload={handleReload} onToggleWeapon={setActiveWeapon} />
             </>
           )}
         </Canvas>
@@ -2980,13 +3303,14 @@ export default function App() {
   );
 }
 
-function InputHandler({ onReload, onToggleWeapon }: { onReload: () => void, onToggleWeapon: (equipped: boolean) => void }) {
+function InputHandler({ onReload, onToggleWeapon }: { onReload: () => void, onToggleWeapon: (weapon: 'NONE' | 'SMG' | 'M4_HOWL') => void }) {
   const [, getKeys] = useKeyboardControls();
   
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-        if (e.key === 'h' || e.key === 'H') onToggleWeapon(false);
-        if (e.key === '1') onToggleWeapon(true);
+        if (e.key === 'h' || e.key === 'H') onToggleWeapon('NONE');
+        if (e.key === '1') onToggleWeapon('SMG');
+        if (e.key === '2') onToggleWeapon('M4_HOWL');
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);

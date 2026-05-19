@@ -1,8 +1,8 @@
 import React, { useRef, useState, useMemo, useEffect } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
-import { Box, Cylinder, Sphere, Html, Torus } from '@react-three/drei';
+import { Box, Cylinder, Sphere, Html, Torus, SpotLight } from '@react-three/drei';
 import * as THREE from 'three';
-import { globalSpeechQueue } from './App';
+import { playRobotSpeech } from './App';
 
 const FEMALE_CHATS = [
   "This unit's groove inhibitors are fully disabled.",
@@ -29,7 +29,7 @@ function speakChatter(text: string, pitch: number, cameraPos: THREE.Vector3, sou
    const dist = cameraPos.distanceTo(sourcePos);
    if (dist < 10) {
        const volume = Math.max(0, 1.0 - (dist / 10));
-       globalSpeechQueue.add(text, pitch, 1.1, volume, name);
+       playRobotSpeech(text, pitch, volume, name);
    }
 }
 
@@ -61,14 +61,17 @@ function DancerBot({ position, color, hairColor, delayOffset, targetBarPos }: { 
 
     if (mode === 'DANCING') {
       groupRef.current.position.lerp(originalPos, 0.05);
-      groupRef.current.position.y = originalPos.y + Math.abs(Math.sin(t * 4)) * 0.2;
-      groupRef.current.rotation.y = Math.sin(t * 2) * 0.5;
+      groupRef.current.position.y = originalPos.y + Math.abs(Math.sin(t * 8)) * 0.4;
+      groupRef.current.rotation.y = Math.sin(t * 4) * 0.8 + t; // spinning and swaying
       
-      if (lArmRef.current) lArmRef.current.rotation.x = Math.sin(t * 6 + 1) * 1.5;
-      if (rArmRef.current) rArmRef.current.rotation.x = Math.sin(t * 6 + 2) * 1.5;
+      if (lArmRef.current) lArmRef.current.rotation.x = Math.sin(t * 12 + 1) * 2.0;
+      if (rArmRef.current) rArmRef.current.rotation.x = Math.sin(t * 12 + 2) * -2.0;
+      if (lArmRef.current) lArmRef.current.rotation.z = Math.sin(t * 8) * 0.5;
+      if (rArmRef.current) rArmRef.current.rotation.z = -Math.sin(t * 8) * 0.5;
+      
       if (headRef.current) {
-          headRef.current.rotation.z = Math.sin(t * 8) * 0.2;
-          headRef.current.rotation.x = Math.sin(t * 4) * 0.2;
+          headRef.current.rotation.z = Math.sin(t * 12) * 0.4;
+          headRef.current.rotation.x = Math.sin(t * 6) * 0.3;
       }
     } else {
       // Sitting at the bar
@@ -159,7 +162,7 @@ function DancerBot({ position, color, hairColor, delayOffset, targetBarPos }: { 
 }
 
 // Bartender Robot
-function BartenderBot({ position }: { position: [number, number, number] }) {
+function BartenderBot({ position, rotation = [0, 0, 0] }: { position: [number, number, number], rotation?: [number, number, number] }) {
   const groupRef = useRef<THREE.Group>(null);
   const headRef = useRef<THREE.Mesh>(null);
   const lArmRef = useRef<THREE.Mesh>(null);
@@ -190,34 +193,40 @@ function BartenderBot({ position }: { position: [number, number, number] }) {
     // Movement logic
     if (isMixing) {
         // Frantic mixing animation
-        groupRef.current.position.x = position[0] + Math.sin(t * 8) * 0.1;
+        groupRef.current.position.z = position[2] + Math.sin(t * 8) * 0.1;
         if (headRef.current) {
-            headRef.current.rotation.y = Math.sin(t * 10) * 0.1;
+            headRef.current.rotation.y = Math.sin(t * 10) * 0.2;
+            headRef.current.rotation.x = Math.sin(t * 5) * 0.1;
         }
+        
+        // Crazy flair bartending
+        const flair = t * 15;
         if (lArmRef.current) {
-            lArmRef.current.rotation.x = Math.PI / -2 + Math.sin(t * 20) * 0.3;
-            lArmRef.current.rotation.z = 0.4;
+            lArmRef.current.rotation.x = Math.PI / -1.5 + Math.sin(flair) * 0.5;
+            lArmRef.current.rotation.z = Math.cos(flair) * 0.5;
         }
         if (rArmRef.current) {
-            rArmRef.current.rotation.x = Math.PI / -2 + Math.sin(t * 20 + Math.PI) * 0.3;
-            rArmRef.current.rotation.z = -0.4;
+            rArmRef.current.rotation.x = Math.PI / -1.5 + Math.sin(flair + Math.PI) * 0.5;
+            rArmRef.current.rotation.z = -Math.cos(flair) * 0.5;
         }
         if (drinkRef.current) {
             drinkRef.current.visible = true;
-            drinkRef.current.position.y = 0.6 + Math.sin(t * 20) * 0.05;
-            drinkRef.current.rotation.z = Math.sin(t * 20) * 0.2;
-            const mixIntensity = Math.abs(Math.sin(t * 3));
+            // Throwing shaker back and forth
+            drinkRef.current.position.x = Math.sin(flair) * 0.6;
+            drinkRef.current.position.y = 0.8 + Math.abs(Math.cos(flair)) * 0.5;
+            drinkRef.current.rotation.z = flair;
+            const mixIntensity = Math.abs(Math.sin(t * 5));
             (drinkRef.current.children[0] as THREE.Mesh).material = new THREE.MeshStandardMaterial({
                 color: new THREE.Color().setHSL(mixIntensity, 1, 0.5),
                 emissive: new THREE.Color().setHSL(mixIntensity, 1, 0.5),
-                emissiveIntensity: 1,
+                emissiveIntensity: 1.5,
                 transparent: true,
-                opacity: 0.8
+                opacity: 0.9
             });
         }
     } else {
-        // Busy working movements
-        groupRef.current.position.x = position[0] + Math.sin(t * 1.5) * 0.5;
+        // Busy working movements (slide along Z behind bar)
+        groupRef.current.position.z = position[2] + Math.sin(t * 1.5) * 1.5;
         if (headRef.current) {
             headRef.current.rotation.y = Math.sin(t * 2) * 0.3;
         }
@@ -253,7 +262,7 @@ function BartenderBot({ position }: { position: [number, number, number] }) {
   });
 
   return (
-    <group ref={groupRef} position={position}>
+    <group ref={groupRef} position={position} rotation={rotation as any}>
       {/* Body */}
       <Box args={[0.6, 1.0, 0.4]} position={[0, 0.5, 0]}>
         <meshStandardMaterial color="#334155" metalness={0.9} roughness={0.3} />
@@ -347,16 +356,50 @@ function InteractiveStool({ position, delayOffset }: { position: [number, number
 
 export function DanceFloorAndBar({ position }: { position: [number, number, number] }) {
   const floorRef = useRef<THREE.Group>(null);
+  const lightsRef = useRef<THREE.Group>(null);
   
   useFrame((state) => {
+     const t = state.clock.elapsedTime;
      if (floorRef.current) {
-        const t = state.clock.elapsedTime;
-        // Subtle color pulsing on the floor if possible, or just rotation
+        floorRef.current.children.forEach((child, idx) => {
+           if (idx > 0 && child instanceof THREE.Mesh) {
+               // Dynamic grid colors
+               const i = idx % 5;
+               const j = Math.floor(idx / 5);
+               const cycle = (Math.sin(t * 2 + i) + Math.cos(t * 1.5 + j)) * 0.5 + 0.5;
+               const mat = child.material as THREE.MeshStandardMaterial;
+               mat.emissiveIntensity = cycle * 0.8;
+           }
+        });
+     }
+     if (lightsRef.current) {
+         lightsRef.current.children.forEach((spot, idx) => {
+             if (spot.type === 'SpotLight') {
+                 const angle = t * 1.5 + (idx * Math.PI / 2);
+                 const sl = spot as THREE.SpotLight;
+                 sl.target.position.x = Math.sin(angle) * 3;
+                 sl.target.position.z = Math.cos(angle) * 3;
+                 sl.target.updateMatrixWorld();
+             }
+         });
+         lightsRef.current.rotation.y = t * 0.5;
      }
   });
 
   return (
     <group position={position}>
+       {/* Club Spotlights / Disco Ball area */}
+       <group ref={lightsRef} position={[-2, 6, 0]}>
+         <spotLight position={[1, 0, 1]} angle={0.3} penumbra={0.5} color="#ec4899" intensity={10} distance={10} castShadow />
+         <spotLight position={[-1, 0, 1]} angle={0.3} penumbra={0.5} color="#0ea5e9" intensity={10} distance={10} castShadow />
+         <spotLight position={[1, 0, -1]} angle={0.3} penumbra={0.5} color="#8b5cf6" intensity={10} distance={10} castShadow />
+         <spotLight position={[-1, 0, -1]} angle={0.3} penumbra={0.5} color="#10b981" intensity={10} distance={10} castShadow />
+         
+         <Sphere args={[0.3, 16, 16]} position={[0, -0.5, 0]}>
+            <meshStandardMaterial color="#fff" metalness={1} roughness={0.0} emissive="#fff" emissiveIntensity={0.2} />
+         </Sphere>
+       </group>
+
        {/* 8x8 Dance Floor */}
        <group ref={floorRef} position={[-2, 0.05, 0]}>
            <Box args={[6, 0.1, 6]}>
@@ -403,9 +446,18 @@ export function DanceFloorAndBar({ position }: { position: [number, number, numb
            <Cylinder args={[0.05, 0.05, 0.15, 8]} position={[-0.5, 1.375, 1]}>
                <meshStandardMaterial color="#ec4899" emissive="#ec4899" emissiveIntensity={1} transparent opacity={0.8} />
            </Cylinder>
+           <Cylinder args={[0.08, 0.04, 0.25, 8]} position={[-0.3, 1.425, 0.5]}>
+               <meshStandardMaterial color="#38bdf8" emissive="#38bdf8" emissiveIntensity={0.8} transparent opacity={0.9} />
+           </Cylinder>
+           <Cylinder args={[0.04, 0.04, 0.1, 8]} position={[-0.6, 1.35, -0.2]}>
+               <meshStandardMaterial color="#eab308" emissive="#eab308" emissiveIntensity={1} transparent opacity={0.8} />
+           </Cylinder>
+           <Box args={[0.1, 0.3, 0.1]} position={[-0.4, 1.45, -1.5]}>
+               <meshStandardMaterial color="#a855f7" emissive="#a855f7" emissiveIntensity={0.8} transparent opacity={0.7} />
+           </Box>
 
            {/* Bartender */}
-           <BartenderBot position={[1, 0, 0]} />
+           <BartenderBot position={[1.5, 0, 0]} rotation={[0, -Math.PI / 2, 0]} />
        </group>
     </group>
   );

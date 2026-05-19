@@ -3,7 +3,7 @@ import { useFrame, useThree } from '@react-three/fiber';
 import { Box, Html, Cylinder, Torus, Sphere, Text } from '@react-three/drei';
 import * as THREE from 'three';
 
-import { globalSpeechQueue } from './App';
+import { playRobotSpeech } from './App';
 
 // -- Blackjack Logic Constants --
 const SUITS = ['♠', '♥', '♦', '♣'];
@@ -95,14 +95,15 @@ function isHandSoft(hand: string[]) {
 }
 
 // Global speech function to avoid overlaps
-function speakBlackjack(text: string, index: number | 'dealer') {
+function speakBlackjack(text: string, index: number | 'dealer', volume: number = 1.0) {
     let pitch = 0.6;
-    if (index === 'dealer') pitch = 0.3; // Deep dealer voice
-    else if (index === 0) pitch = 0.7; // High-pitch chaotic bot
-    else if (index === 1) pitch = 0.5; // Medium Basic Strategy bot
-    else if (index === 2) pitch = 0.4; // Slightly lower conservative bot
+    let name = "UNKNOWN";
+    if (index === 'dealer') { pitch = 0.3; name = "DEALER_BOT"; }
+    else if (index === 0) { pitch = 0.7; name = "PLAYER_UNIT_1"; }
+    else if (index === 1) { pitch = 0.5; name = "PLAYER_UNIT_2"; }
+    else if (index === 2) { pitch = 0.4; name = "PLAYER_UNIT_3"; }
     
-    globalSpeechQueue.add(text, pitch, 1.0);
+    playRobotSpeech(text, pitch, volume, name);
 }
 
 let sharedAudioCtx: AudioContext | null = null;
@@ -247,10 +248,12 @@ function BlackjackRobot({ position, rotation, name, color, active, cards, isDeal
     banter?: string | null
 }) {
     const groupRef = useRef<THREE.Group>(null);
+    const bodyRef = useRef<THREE.Group>(null);
+    const headRef = useRef<THREE.Mesh>(null);
     const timeRef = useRef(0);
     
     useFrame((state, delta) => {
-        if (!groupRef.current) return;
+        if (!groupRef.current || !bodyRef.current) return;
         timeRef.current += delta;
         const time = timeRef.current;
         
@@ -260,8 +263,12 @@ function BlackjackRobot({ position, rotation, name, color, active, cards, isDeal
         }
         groupRef.current.position.y = position[1] + hoverY;
         
+        // Body leaning
+        const targetHoverRotX = active ? 0.3 : 0.1;
+        bodyRef.current.rotation.x = THREE.MathUtils.lerp(bodyRef.current.rotation.x, targetHoverRotX, delta * 3);
+
         // Head bobbing
-        const head = groupRef.current.children[1] as THREE.Mesh;
+        const head = headRef.current;
         if (head) {
              head.rotation.y = Math.sin(time * 0.5) * 0.1;
              head.rotation.x = active ? Math.sin(time * 5) * 0.1 : 0;
@@ -278,21 +285,24 @@ function BlackjackRobot({ position, rotation, name, color, active, cards, isDeal
 
     return (
         <group position={position} rotation={[0, rotation, 0]} ref={groupRef}>
-             {/* Robot Body */}
-             <Box args={[0.5, 0.8, 0.4]} position={[0, 0.4, 0]}>
-                 <meshStandardMaterial color="#0f172a" metalness={0.8} />
-             </Box>
-             {/* Robot Head */}
-             <Box args={[0.4, 0.4, 0.4]} position={[0, 1.0, 0]}>
-                 <meshStandardMaterial color="#1e293b" metalness={0.9} />
-                 {/* Eye */}
-                 <Box args={[0.3, 0.08, 0.05]} position={[0, 0.05, 0.2]}>
-                    <meshBasicMaterial color={active ? "#10b981" : color} />
+             {/* Robot Body & Head wrapper so they rotate together over table */}
+             <group ref={bodyRef}>
+                 {/* Robot Body */}
+                 <Box args={[0.5, 0.8, 0.4]} position={[0, 0.4, 0]}>
+                     <meshStandardMaterial color="#0f172a" metalness={0.8} />
                  </Box>
-             </Box>
+                 {/* Robot Head */}
+                 <Box ref={headRef} args={[0.4, 0.4, 0.4]} position={[0, 1.0, 0]}>
+                     <meshStandardMaterial color="#1e293b" metalness={0.9} />
+                     {/* Eye */}
+                     <Box args={[0.3, 0.08, 0.05]} position={[0, 0.05, 0.2]}>
+                        <meshBasicMaterial color={active ? "#10b981" : color} />
+                     </Box>
+                 </Box>
+             </group>
              
-             {/* Cards on Table */}
-             <group position={[0, -0.85 + 0.88, 0.8]} rotation={[-Math.PI / 2, 0, 0]}>
+             {/* Cards on Table (Independent to stay flat) */}
+             <group position={[0, -0.85 + 0.88 + 0.02, 1.5]} rotation={[-Math.PI / 2, 0, 0]}>
                 {cards.map((c, i) => {
                     const isHidden = isDealer && i === 1 && status !== 'DEALER_TURN' && status !== 'GAME_OVER';
                     return <AnimatedCard key={i} card={c} index={i} total={cards.length} isHidden={isHidden} />
@@ -379,7 +389,7 @@ export function BlackjackGame({ position }: { position: [number, number, number]
                 else if (index === 1) { pitch = 0.5; speakerName = "PLAYER_UNIT_2"; }
                 else if (index === 2) { pitch = 0.4; speakerName = "PLAYER_UNIT_3"; }
                 
-                globalSpeechQueue.add(text, pitch, 1.0, volume, speakerName);
+                playRobotSpeech(text, pitch, volume, speakerName);
                 lastTalkTime.current = now;
             }
         }
@@ -623,7 +633,7 @@ export function BlackjackGame({ position }: { position: [number, number, number]
 
             {/* Dealer */}
             <BlackjackRobot 
-                position={[0, 0.85, -2.2]} 
+                position={[0, 0.85, -3.8]} 
                 rotation={0} 
                 name="DEALER_BOT" 
                 color="#f43f5e" 
@@ -637,7 +647,7 @@ export function BlackjackGame({ position }: { position: [number, number, number]
             {/* Players */}
             {[0, 1, 2].map((i) => {
                 const angle = (Math.PI / 3) * -(i - 1); // Flip the arc, wider spread
-                const radius = 2.6; // Further out
+                const radius = 3.8; // Further out
                 const distToCenter = 1.6; // Chips further out
                 return (
                     <group key={i}>
